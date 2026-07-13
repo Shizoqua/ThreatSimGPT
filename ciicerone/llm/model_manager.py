@@ -6,13 +6,10 @@ and manage local models across different providers.
 
 import logging
 import asyncio
-import os
 from typing import Dict, Any, List, Optional, Tuple, Callable
 from pathlib import Path
 import json
 from datetime import datetime
-
-from ciicerone.llm.exceptions import AirGapViolationError
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +40,10 @@ class ModelManager:
         self.model_cache_dir = Path(self.config.get('model_cache_dir', './models'))
         self.model_cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Air-gap mode: block all external model downloads
-        self.air_gapped = bool(
-            self.config.get('air_gapped_mode')
-            or os.getenv('AIR_GAPPED_MODE', '').lower() in ('true', '1', 'yes')
-        )
+        # Air-gap mode: structured config matching provider pattern
+        air_gap_config = self.config.get('air_gap', {})
+        self.air_gap_enabled = air_gap_config.get('enabled', False)
+        self.air_gap_block_downloads = air_gap_config.get('block_downloads', True)
 
         # Model registry file
         self.registry_file = self.model_cache_dir / 'model_registry.json'
@@ -55,18 +51,6 @@ class ModelManager:
 
         # Session management for HTTP requests
         self._session: Optional[aiohttp.ClientSession] = None
-
-    def _check_air_gap(self, operation: str = "model download") -> None:
-        """Verify air-gap mode is not violated by an external HTTP operation.
-
-        Raises:
-            AirGapViolationError: If air-gap mode is enabled.
-        """
-        if self.air_gapped:
-            raise AirGapViolationError(
-                f"Air-gap mode is enabled. {operation} would require an external HTTP call. "
-                "Pre-load models before enabling AIR_GAPPED_MODE."
-            )
 
     def _is_model_preloaded(self, model_name: str, provider: str) -> bool:
         """Check if a model is already registered locally.
@@ -448,7 +432,7 @@ class ModelManager:
         if not REQUESTS_AVAILABLE:
             return {"error": "requests library required for downloads"}
 
-        if self.air_gapped:
+        if self.air_gap_enabled and self.air_gap_block_downloads:
             if self._is_model_preloaded(model_name, provider):
                 return {
                     "status": "success",
@@ -457,9 +441,9 @@ class ModelManager:
                     "path": self.registry['models'][model_name]['path'],
                     "message": "Model already available locally in air-gap mode.",
                 }
-            raise AirGapViolationError(
+            raise PermissionError(
                 f"Model {model_name} not found in local cache. "
-                "Pre-load models before enabling AIR_GAPPED_MODE."
+                "Pre-load models before enabling air-gap mode."
             )
 
         try:
@@ -475,8 +459,6 @@ class ModelManager:
             file_path = provider_dir / filename
 
             logger.info(f"Downloading {model_name} from {download_url}")
-
-            self._check_air_gap("model download")
 
             def download():
                 response = requests.get(download_url, stream=True)
